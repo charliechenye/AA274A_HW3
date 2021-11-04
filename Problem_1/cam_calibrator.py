@@ -105,12 +105,21 @@ class CameraCalibrator:
         HINT: You MAY find the function np.meshgrid() useful.
         """
         ########## Code starts here ##########
-
+        # compute for one board
+        x_points = np.arange(self.n_corners_x) * self.d_square
+        y_points = np.arange(self.n_corners_y) * self.d_square
+        x_mesh, y_mesh = np.meshgrid(x_points, y_points, indexing='xy')
+        Xg = x_mesh.flatten()
+        Yg = y_mesh.flatten()
+        # repeat for n boards
+        corner_coordinates =(np.stack([Xg] * self.n_chessboards),
+                             np.stack([Yg] * self.n_chessboards))
         ########## Code ends here ##########
         return corner_coordinates
 
     def estimateHomography(self, u_meas, v_meas, X, Y):  # Zhang Appendix A
         """
+        Estimate homography matrix H for one board
         Inputs:
             u_meas: an array of the u values for a board.
             v_meas: an array of the v values for a board.
@@ -124,7 +133,37 @@ class CameraCalibrator:
         HINT: Some numpy functions that might come in handy are stack, vstack, hstack, column_stack, expand_dims, zeros_like, and ones_like.
         """
         ########## Code starts here ##########
+        # homogenous coordinates for the points in world coordinates
+        Ph_w = np.array([X, Y, np.ones_like(X)], dtype='float')
+        # print('Estimate Homography', Ph_w.shape)
+        # blocks of equations, 2 for each corresponding pairs (u, v) -> (X, Y)
+        block_list = []
+        zero_vec = None
+        n_dim = Ph_w.shape[0]
+        n_points = Ph_w.shape[1]
+        for point_i in range(n_points):
+            Ph_w_i = Ph_w[:, point_i]
+            # ensure the transpose will succeed
+            Ph_w_i.shape = (n_dim, 1)
+            Ph_w_i_t = np.transpose(Ph_w_i)
+            if zero_vec is None:
+                zero_vec = np.zeros_like(Ph_w_i_t)
+            current_block = np.block([
+                [-Ph_w_i_t, zero_vec, u_meas[point_i] * Ph_w_i_t],
+                [zero_vec, -Ph_w_i_t, v_meas[point_i] * Ph_w_i_t],
+            ])
+            block_list.append(current_block)
 
+        L = np.vstack(block_list)
+
+        # solve constrained least squared problems Lm = 0 using SVD
+        _, _, vt = np.linalg.svd(L)
+        m = vt[-1, :]   # retrieve the eigen vector associated with the smallest eigen value
+        m1, m2, m3 = m[:3], m[3: 6], m[6: 9]
+
+        H = np.vstack((m1, m2, m3))
+        # print('m1', m1.shape, 'm2', m2.shape, 'm3', m3.shape)
+        # print('Estimate Homography', H.shape)
         ########## Code ends here ##########
         return H
 
@@ -141,6 +180,45 @@ class CameraCalibrator:
         HINT: What is the size of V?
         """
         ########## Code starts here ##########
+        def get_v_ij_t(i, j, current_h):
+            entry_1 = current_h[0, i] * current_h[0, j]
+            entry_2 = current_h[0, i] * current_h[1, j] + current_h[1, i] * current_h[0, j]
+            entry_3 = current_h[1, i] * current_h[1, j]
+            entry_4 = current_h[2, i] * current_h[0, j] + current_h[0, i] * current_h[2, j]
+            entry_5 = current_h[2, i] * current_h[1, j] + current_h[1, i] * current_h[2, j]
+            entry_6 = current_h[2, i] * current_h[2, j]
+            return np.array([[entry_1, entry_2, entry_3, entry_4, entry_5, entry_6]], dtype='float')
+
+        # aggregate conditions for each board
+        V_list = []
+        for curr_h in H:
+            v_12_t = get_v_ij_t(0, 1, curr_h)
+            v_11_minus_22_t = get_v_ij_t(0, 0, curr_h) - get_v_ij_t(1, 1, curr_h)
+            cur_image_v = np.vstack((v_12_t, v_11_minus_22_t))
+            V_list.append(cur_image_v)
+
+        V_blocks = np.vstack(V_list).astype('float')
+        # solve the constrained least squares problem using SVD
+        _, _, vt = np.linalg.svd(V_blocks)
+        b = vt[-1, :]   # the eigen vector associated with the smallest eigen value
+
+        B11, B12, B22, B13, B23, B33 = b
+        # print('b', b)
+        # print('B', B11, B12, B22, B13, B23, B33)
+
+        # get intrinsic matrix A
+        v0 = (B12 * B13 - B11 * B23) / (B11 * B22 - (B12 ** 2))
+        lamb = B33 - (((B13 ** 2) + v0 * (B12 * B13 - B11 * B23)) / (B11))  # lambda
+        alpha = np.sqrt((lamb / B11))
+        beta = np.sqrt((lamb * B11) / (B11 * B22 - (B12 ** 2)))
+        gamma = (-B12 * (alpha ** 2) * beta) / lamb
+        u0 = ((gamma * v0) / beta) - ((B13 * (alpha ** 2)) / lamb)
+
+        A = np.array([
+            [alpha, gamma, u0],
+            [0, beta, v0],
+            [0, 0, 1],
+        ])
 
         ########## Code ends here ##########
         return A
@@ -155,7 +233,29 @@ class CameraCalibrator:
             t: the translation vector
         """
         ########## Code starts here ##########
+        # print('Get Extrinsics', H.shape)
+        # print('Get Extrinsics', A.shape)
+        A_inv = np.linalg.inv(A)
+        h1 = H[:, 0]
+        h2 = H[:, 1]
+        h3 = H[:, 2]
 
+        # print('Get Extrinsics', A_inv.shape)
+        # print('Get Extrinsics', h1.shape, h2.shape, h3.shape)
+        lamb = 1.0 / np.linalg.norm(np.matmul(A_inv, h1))
+
+
+        r1 = lamb * np.matmul(A_inv, h1)
+        r2 = lamb * np.matmul(A_inv, h2)
+        r3 = np.cross(r1, r2)
+
+        t = lamb * np.matmul(A_inv, h3)
+
+        # build preliminary rotation matrix Q
+        Q = np.array([r1, r2, r3]).T
+        # want orthogonal rotation matrix R with the smallest Frobenius norm of R - Q
+        u, _, vt = np.linalg.svd(Q)
+        R = np.matmul(u, vt)
         ########## Code ends here ##########
         return R, t
 
@@ -163,6 +263,7 @@ class CameraCalibrator:
         self, X, Y, Z, R, t
     ):  # Zhang 2.1, Eq. (1)
         """
+        Convert onto image plane without multiplying the intrinsic camera matrix
         Inputs:
             X, Y, Z: the world coordinates of the points for a given board. This is an array of 63 elements
                      X, Y come from genCornerCoordinates. Since the board is planar, we assume Z is an array of zeros.
@@ -172,7 +273,24 @@ class CameraCalibrator:
 
         """
         ########## Code starts here ##########
+        # homogeneous world coordinates
+        n_dims = 3
+        Ph_w = np.array([X, Y, Z, np.ones_like(X)], dtype='float', ndmin=2)
+        Ph_c_list = []
 
+        t.shape = (3, 1)  # for block concatenation
+        rt_block = np.block([[R, t], ])
+
+        for point_i in range(Ph_w.shape[1]):
+            Ph_w_i = Ph_w[:, point_i]
+            Ph_w_i.shape = (n_dims + 1, 1)
+            Ph_c_i = np.matmul(rt_block, Ph_w_i)
+            Ph_c_list.append(np.squeeze(Ph_c_i))
+
+        Pc = np.vstack(Ph_c_list)
+        # print('Transform World 2 Norm Image', Pc.shape)
+        x = Pc[:, 0] / Pc[:, -1]
+        y = Pc[:, 1] / Pc[:, -1]
         ########## Code ends here ##########
         return x, y
 
@@ -189,7 +307,26 @@ class CameraCalibrator:
             u, v: the coordinates in the ideal pixel image plane
         """
         ########## Code starts here ##########
+        # homogeneous world coordinates
+        n_dims = 3
+        Ph_w = np.array([X, Y, Z, np.ones_like(X)], dtype='float', ndmin=2)
 
+        t.shape = (3, 1)    # for block concatenation
+        rt_block = np.block([[R, t], ])
+        art_block = np.matmul(A, rt_block)
+
+        # homogeneous pixel coordinates
+        ph_list = []
+        for point_i in range(Ph_w.shape[1]):
+            Ph_w_i = Ph_w[:, point_i]
+            Ph_w_i.shape = (n_dims + 1, 1)
+            ph_i = np.matmul(art_block, Ph_w_i)
+            ph_list.append(np.squeeze(ph_i))
+
+        ph = np.vstack(ph_list)
+        # un-homogenize u v coordinates
+        u = ph[:, 0] / ph[:, 2]
+        v = ph[:, 1] / ph[:, 2]
         ########## Code ends here ##########
         return u, v
 
