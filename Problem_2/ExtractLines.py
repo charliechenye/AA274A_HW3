@@ -165,12 +165,14 @@ def FindSplit(theta, rho, alpha, r, params):
     if len(theta) < 2 * min_nodes_per_segment:
         # not enough points to split into 2 segments
         return _no_split
-    node_distance = np.abs(rho * np.cos(theta - alpha) - r)
-    if max(node_distance[min_nodes_per_segment: -min_nodes_per_segment + 1]) <= params['LINE_POINT_DIST_THRESHOLD']:
+    # range for eligible P
+    p_range = np.arange(min_nodes_per_segment, len(theta) - min_nodes_per_segment + 1)
+    node_distance = np.abs(rho[p_range] * np.cos(theta[p_range] - alpha) - r)
+    if max(node_distance) <= params['LINE_POINT_DIST_THRESHOLD']:
         # only need to check distance of eligible P
         return _no_split
     else:
-        return np.argmax(node_distance[min_nodes_per_segment: -min_nodes_per_segment + 1]) + min_nodes_per_segment
+        return np.argmax(node_distance) + min_nodes_per_segment
     ########## Code ends here ##########
     # return splitIdx
 
